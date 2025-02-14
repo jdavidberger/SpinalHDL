@@ -284,10 +284,12 @@ case class Wishbone(config: WishboneConfig) extends Bundle with FormalMasterSlav
     private val wasStalledRequest = past(isRequestStalled) init (False)
     private val invalidRequestDrop = wasStalledRequest && !masterHasRequest
 
-    private val dataChanged = Bool()
-    dataChanged := False
+    private val dataStableValid = Bool()
+    dataStableValid := True
+    val effective_mosi = Mux(WE, DAT_MOSI, B(0))
+    val effective_sel = if (SEL == null) null else Mux(WE, SEL, B(0))
     when(wasStalledRequest) {
-      dataChanged := Seq(DAT_MOSI, ADR, WE, SEL)
+      dataStableValid := Seq(effective_mosi, ADR, WE, effective_sel)
         .filter(_ != null)
         .map(x => stable(x))
         .fold(True)((a, b) => a & b)
@@ -301,7 +303,7 @@ case class Wishbone(config: WishboneConfig) extends Bundle with FormalMasterSlav
 //      pastValid() && (!past(ERR) || !CYC)
 //    } else True
 
-    val isValid: Bool = !dataChanged && !invalidRequestDrop
+    val isValid: Bool = dataStableValid && !invalidRequestDrop
   }.isValid
 
   lazy val formalConsumerContract = new Composite(this, "isConsumerValid") {

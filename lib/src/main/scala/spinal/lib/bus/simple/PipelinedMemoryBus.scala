@@ -59,7 +59,7 @@ case class PipelinedMemoryBus(config : PipelinedMemoryBusConfig) extends Bundle 
 
   def readRequestFire = cmd.fire && !cmd.write
   lazy val formalContract = new Composite(this, "formalContract") {
-    val outstandingReads = CounterUpDown(0x100000000L, incWhen = readRequestFire, decWhen = rsp.valid)
+    val outstandingReads = CounterUpDown(0x100000000L, incWhen = readRequestFire, decWhen = rsp.valid).formalAsserts()
     if(globalData.config.formalAsserts) {
       assume(!outstandingReads.willOverflow) // This is required for the inductive formal methods to work
     }
@@ -223,7 +223,6 @@ case class PipelinedMemoryBusArbiter(pipelinedMemoryBusConfig : PipelinedMemoryB
 
       val rspQueueArea = if(logic.rspQueue != null) new Area {
         import logic.rspQueue._
-        rspRouteFifo.formalChecks()
 
         if(this.globalData.config.formalAsserts) {
           assertOrAssume(rspRouteFifo.formalCheckRam(CountOne(_) =/= 1).orR === False)
@@ -267,6 +266,7 @@ case class PipelinedMemoryBusArbiter(pipelinedMemoryBusConfig : PipelinedMemoryB
       }
     }
 
+    formalCheckOutputsAndChildren()
   }
 }
 

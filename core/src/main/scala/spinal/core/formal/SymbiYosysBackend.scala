@@ -55,7 +55,14 @@ case class SmtBmc(
     unroll: Option[Boolean] = None,
     dumpsmt2: Boolean = false,
     progress: Boolean = true,
-    solver: SmtBmcSolver.SmtBmcSolver = SmtBmcSolver.Yices
+    solver: SmtBmcSolver.SmtBmcSolver = SmtBmcSolver.Yices,
+    noincr: Boolean = false,
+    generate_arbitrary_trace : Boolean = false,
+    detect_loops : Boolean = false,
+    incremental : Boolean = false,
+    track_assumes : Boolean = false,
+    minimize_assumes : Boolean = false,
+    debug : Boolean = false,
 ) extends SbyEngine {
   def command: String = {
     "smtbmc" +
@@ -79,7 +86,16 @@ case class SmtBmc(
        else { "" }) +
       (if (progress) { " --progress" }
        else { "" }) +
-      s" $solver"
+      s" $solver" +
+      " --" +
+      (if (generate_arbitrary_trace) { " -g" } else { "" }) +
+      (if (debug) { " -v" } else { "" }) +
+      (if (detect_loops) { " --detect-loops" } else { "" }) +
+      (if (incremental) { " --incremental" } else { "" }) +
+      (if (track_assumes) { " --track-assumes" } else { "" }) +
+      (if (noincr) { " --noincr" }
+      else { "" }) +
+      (if (minimize_assumes) { " --minimize-assumes" } else { "" })
   }
 }
 

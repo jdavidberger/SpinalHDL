@@ -104,6 +104,10 @@ class PipelinedMemoryBusInterconnectFormal(mappings: Seq[AddressMapping], pendin
     anyseq(input.cmd.valid)
     input.cmd.formalAssumesSlave()
   })
+
+  addPrePopTask(() => {
+    HasFormalAsserts.printFormalAssertsReport()
+  })
 }
 
 object FormalPipelinedMemoryBus {

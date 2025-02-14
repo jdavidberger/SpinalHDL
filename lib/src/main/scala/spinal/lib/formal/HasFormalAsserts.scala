@@ -1,7 +1,8 @@
 package spinal.lib.formal
 
 import spinal.core.formal.anyseq
-import spinal.core.{Bool, Component, Composite, Data, MultiData, SpinalTag, True, Vec, assert, assume, cover, when}
+import spinal.core.internals.{AssertStatement, AssertStatementKind}
+import spinal.core.{Bool, Component, Composite, Data, MultiData, SpinalTag, SpinalWarning, True, Vec, assert, assume, cover, when}
 import spinal.idslplugin.Location
 import spinal.lib.IMasterSlave
 
@@ -17,15 +18,38 @@ object AssertionLevel extends Enumeration {
 class HasFormalAssertsTag(val formalAsserts : HasFormalAsserts) extends SpinalTag
 
 
-trait HasFormalAsserts {
+trait HasFormalAsserts { self =>
   if (!this.isInstanceOf[Component]) {
     Component.current.addTag(new HasFormalAssertsTag(this))
   }
 
   private val OwningComponent = WeakReference(Component.current)
 
-  private var CurrentAssertionLevel = AssertionLevel.None
-  private var CurrentInputsAssertionLevel = AssertionLevel.None
+  private var _CurrentAssertionLevel = AssertionLevel.None
+  private def CurrentAssertionLevel = _CurrentAssertionLevel
+  private def CurrentAssertionLevel_=(level: AssertionLevel.Value): Unit ={
+    _CurrentAssertionLevel = level
+    val kind = _CurrentAssertionLevel match {
+      case AssertionLevel.Assumption => AssertStatementKind.ASSUME
+      case _ => AssertStatementKind.ASSERT
+    }
+    runFormalChecks()
+    formalProperties.foreach(_.kind = kind)
+  }
+
+  lazy private val formalValidInputsProperty = assert(formalValidInputs, s"Input into ${this} failed its assertion")
+
+  private var _CurrentInputsAssertionLevel = AssertionLevel.None
+  private def CurrentInputsAssertionLevel = _CurrentInputsAssertionLevel
+  private def CurrentInputsAssertionLevel_=(level: AssertionLevel.Value): Unit ={
+    assert(_CurrentInputsAssertionLevel <= level)
+    _CurrentInputsAssertionLevel = level
+    val kind = _CurrentInputsAssertionLevel match {
+      case AssertionLevel.Assumption => AssertStatementKind.ASSUME
+      case _ => AssertStatementKind.ASSERT
+    }
+    formalValidInputsProperty.kind = kind
+  }
 
   def formalConfigureForTest(): this.type = {
     formalAssumeInputs()
@@ -45,16 +69,13 @@ trait HasFormalAsserts {
    */
   final def formalAssertInputs()(implicit useAssumes: Boolean = false): Unit = {
     val newLevel = if (useAssumes) AssertionLevel.Assumption else AssertionLevel.Assertion
-    if (newLevel > CurrentInputsAssertionLevel) {
-      val validInputs = new Composite(OwningComponent(), "formalValidInputs") {
-        val validInputs = formalValidInputs
-      }.validInputs
-      assertOrAssume(validInputs)
+    if(newLevel >= CurrentInputsAssertionLevel) {
       CurrentInputsAssertionLevel = newLevel
     }
   }
 
   final def formalAssumeInputs(): Unit = formalAssertInputs()(useAssumes = true)
+
 
   /**
    * Set o formal assertions required for testing and validating the component completely.
@@ -65,6 +86,21 @@ trait HasFormalAsserts {
    */
   protected def formalChecks()(implicit useAssumes: Boolean = false) : Unit = {}
 
+  private var hasRanFormalChecks = false
+  private def runFormalChecks(useAssumes : Boolean = false): Unit = {
+    if(!hasRanFormalChecks) {
+      hasRanFormalChecks = true
+
+      formalValidInputsProperty
+      when(formalValidInputs) {
+        formalAssertsChildren(assumesInputValid = useAssumes, useAssumes = true)
+        val formerCount = HasFormalAsserts.totalProperties
+        formalChecks()
+        propertiesBody = HasFormalAsserts.totalProperties - formerCount
+      }
+    }
+  }
+
   def FormalCompositeName(implicit useAssumes: Boolean = false) = if (useAssumes) "formalAssumes" else "formalAsserts"
 
   private def formalAssertsChildren(assumesInputValid: Boolean, useAssumes: Boolean = false): Unit = {
@@ -74,7 +110,7 @@ trait HasFormalAsserts {
   }
 
   private def formalAssertsChildren()(implicit useAssumes: Boolean): Unit = {
-    formalAssertsChildren(useAssumes, useAssumes)
+    formalAssertsChildren(false, useAssumes)
   }
 
   def formalAssertOrAssume()(implicit useAssumes: Boolean = false): Unit = {
@@ -85,32 +121,33 @@ trait HasFormalAsserts {
     }
   }
 
-  def formalAsserts(): Unit = {
-    if (CurrentAssertionLevel >= AssertionLevel.Assertion)
-      return
+  var propertiesBody : Int = 0
 
-    CurrentAssertionLevel = AssertionLevel.Assertion
+  def formalAsserts(): this.type = {
+    if (CurrentAssertionLevel >= AssertionLevel.Assertion)
+      return this
 
     formalAssertsChildren()(useAssumes = false)
-    formalChecks()(useAssumes = false)
+    CurrentAssertionLevel = AssertionLevel.Assertion
+
+    this
   }
 
-  def formalAssumes(): Unit = {
+  def formalAssumes(): this.type = {
     if (CurrentAssertionLevel == AssertionLevel.Assumption)
-      return
+      return this
 
-    formalAssumeInputs()
+    formalAssertInputs()
     if (HasFormalAsserts.alwaysAssert) {
       formalAsserts()
     } else {
       CurrentAssertionLevel = AssertionLevel.Assumption
-      when(formalValidInputs) {
-        formalAssertsChildren()(useAssumes = true)
-        formalChecks()(useAssumes = true)
-      }
     }
+
+    this
   }
 
+  def formalProperties = new mutable.ArrayBuffer[AssertStatement]()
   /**
    * Helper function; uses the implicit useAssumes variable to either emit an assert or assume
    *
@@ -119,11 +156,41 @@ trait HasFormalAsserts {
    * @param useAssumes True to emit an assume
    */
   def assertOrAssume(cond: Bool, msg: Any*)(implicit loc: Location, useAssumes: Boolean): Unit =
-    HasFormalAsserts.assertOrAssume(cond, msg: _*)
+    formalProperties += HasFormalAsserts.assertOrAssume(cond, msg: _*)
 
+  def formalPropertyAdd(cond: Bool, msg: Any*)(implicit loc: Location): Unit = {
+    formalProperties += (if(CurrentAssertionLevel == AssertionLevel.Assertion) assert(cond, msg) else assume(cond))
+  }
 }
 
 object HasFormalAsserts {
+  def printFormalAssertsReport(): Unit = {
+    val allTraits = allFormalTraits()
+    val allAssumed = allTraits.filter(_.CurrentAssertionLevel == AssertionLevel.Assumption)
+    val allAsserted = allTraits.filter(_.CurrentAssertionLevel == AssertionLevel.Assertion)
+    val allInputsAssumed = allTraits.filter(_.CurrentInputsAssertionLevel == AssertionLevel.Assumption)
+    val allInputsAsserted = allTraits.filter(_.CurrentInputsAssertionLevel == AssertionLevel.Assertion)
+
+    def formalAssertDesc(c : HasFormalAsserts): String = {
+      s"Inputs: ${c.CurrentInputsAssertionLevel} Body: ${c.CurrentAssertionLevel} Properties: ${c.propertiesBody}"
+    }
+    def printTree(c : Component, tabs : Int = 0): Unit = {
+      val desc =
+        c match {
+          case c: HasFormalAsserts => formalAssertDesc(c)
+          case _ => ""
+        }
+
+      val prefix = "\t" * tabs
+      println(s"$prefix ${c.getClass.getSimpleName} ${c.name} ${desc}")
+      c.getTagsOf[HasFormalAssertsTag]().map(_.formalAsserts).foreach(c => {
+        println(s"\t$prefix ${c.getClass.getSimpleName} $c ${formalAssertDesc(c)}")
+      })
+      c.children.foreach(printTree(_, tabs = tabs + 1))
+    }
+
+    printTree(Component.toplevel)
+  }
   private def alwaysAssert: Boolean = sys.env.contains("SPINAL_FORMAL_NEVER_ASSUME")
 
   private def formalAssertTags(c: Component, assumesInputValid: Boolean, useAssumes: Boolean = false): Unit = {
@@ -133,6 +200,29 @@ object HasFormalAsserts {
       a.formalAssertInputs()(useAssumes = assumesInputValid)
       a.formalAssertOrAssume()(useAssumes)
     })
+  }
+
+  private def allFormalTraits(c: Component = Component.toplevel): Seq[HasFormalAsserts] = {
+    if (c == null) {
+      return Seq()
+    }
+
+    def apply(c: Component, walkSet: mutable.HashSet[Component]): Seq[HasFormalAsserts] = {
+      if (!walkSet.contains(c)) {
+
+        walkSet += c
+
+        (c match {
+          case asserts: HasFormalAsserts => Seq(asserts)
+          case _ => Seq()
+        }) ++
+          c.getTagsOf[HasFormalAssertsTag]().map(_.formalAsserts) ++
+          c.children.flatMap(apply(_, walkSet))
+      } else Seq()
+    }
+
+    val walkSet = new mutable.HashSet[Component]()
+    apply(c, walkSet)
   }
 
   def formalAssertsChildren(c: Component, assumesInputValid: Boolean, useAssumes: Boolean = false): Unit = {
@@ -148,21 +238,25 @@ object HasFormalAsserts {
         c match {
           case c: HasFormalAsserts => {
             c.formalAssertInputs()(useAssumes = assumesInputValid)
-            c.formalAssertOrAssume()
+            c.formalAssertOrAssume()(useAssumes = useAssumes)
           }
           case _ => c.walkComponents(apply(_, walkSet))
         }
       }
     }
 
-    c.addPrePopTask(() => {
+    //c.addPrePopTask(() => {
       formalAssertTags(c, assumesInputValid, useAssumes)
 
       val walkSet = new mutable.HashSet[Component]()
       walkSet += c
       c.walkComponents(apply(_, walkSet))
-    })
+    //})
   }
+
+  var totalAsserts : Int = 0
+  var totalAssumes : Int = 0
+  def totalProperties = totalAsserts + totalAssumes
 
   /**
    * Helper function; uses the implicit useAssumes variable to either emit an assert or assume
@@ -171,10 +265,12 @@ object HasFormalAsserts {
    * @param msg        Some backends with asserts will print out a message when an assert fails. Ignored for assumes
    * @param useAssumes True to emit an assume
    */
-  def assertOrAssume(cond: Bool, msg: Any*)(implicit loc: Location, useAssumes: Boolean): Unit = {
+  def assertOrAssume(cond: Bool, msg: Any*)(implicit loc: Location, useAssumes: Boolean): AssertStatement = {
     if (useAssumes) {
+      totalAssumes += 1
       assume(cond)
     } else {
+      totalAsserts += 1
       assert(cond, Seq(msg: _*))
     }
   }
@@ -202,19 +298,21 @@ class ComponentWithFormalAsserts extends Component with HasFormalAsserts {
     getAllIo.filter(_.isInput).filter(_.dlcIsEmpty).foreach(anyseq)
   }
 
-  override lazy val formalValidInputs: Bool =
+  override lazy val formalValidInputs: Bool = {
+
+
     Vec(flattenIO().map({
       case io: FormalMasterSlave =>
+        io.checkForEquivalance()
+
         if(io.isMasterInterface) io.formalIsConsumerValid()
         else if(io.isSlaveInterface) io.formalIsProducerValid()
         else if(io.isInput) io.formalIsValid()
-        else {
-          assert(false)
-          True
-        }
+        else True
       case io: FormalBundle => if(io.isInput) io.formalIsValid() else True
       case _ => True
     })).asBits.andR
+  }
 
   protected def formalCheckOutputs()(implicit useAssumes: Boolean = false): Unit = {
     flattenIO().foreach({
@@ -226,17 +324,20 @@ class ComponentWithFormalAsserts extends Component with HasFormalAsserts {
     })
   }
 
-  override protected def formalChecks()(implicit useAssumes: Boolean = false): Unit = {
-    HasFormalAsserts.formalAssertsChildren(this, assumesInputValid = false, useAssumes = true)
+  def formalCheckOutputsAndChildren()(implicit useAssumes: Boolean = false): Unit = {
     formalCheckOutputs()
+    HasFormalAsserts.formalAssertsChildren(this, assumesInputValid = false, useAssumes = true)
+  }
+  override protected def formalChecks()(implicit useAssumes: Boolean = false): Unit = {
+    formalCheckOutputsAndChildren()
   }
 
-  override def formalAssumes(): Unit = {
+  override def formalAssumes(): this.type = {
     withAutoPull()
     super.formalAssumes()
   }
 
-  override def formalAsserts(): Unit = {
+  override def formalAsserts(): this.type = {
     withAutoPull()
     super.formalAsserts()
   }
