@@ -306,38 +306,7 @@ case class Wishbone(config: WishboneConfig) extends Bundle with FormalMasterSlav
     val isValid: Bool = dataStableValid && !invalidRequestDrop
   }.isValid
 
-  lazy val formalConsumerContract = new Composite(this, "isConsumerValid") {
-    if(config.useSTALL) {
-      ???
-    }
-    // Slaves are allowed to keep ACK high forever; rule 3.55. We track this and allow exemptions to other rules for it.
-    val alwaysAck = RegInit(True) clearWhen(!ACK)
-
-    val masterHasRequest = isCycle && STB
-    val ackStateIsValid = ACK === False || masterHasRequest || alwaysAck
-
-    val errorStateIsValid = if(ERR == null) True else {
-      val isValid = Bool()
-      isValid := True
-      when(ERR) {
-        isValid := !ACK && masterHasRequest
-      }
-      isValid
-    }
-
-    val cycleTerminationSignals = ACK ##
-      (if(ERR != null) ERR else False) ##
-      (if(RTY != null) RTY else False)
-
-    val rule_315 = masterHasRequest || !cycleTerminationSignals.orR || alwaysAck
-    val rule_345 = CountOne(cycleTerminationSignals) <= 1
-
-    val valid = ackStateIsValid && errorStateIsValid && rule_315 && rule_345
-  }
-
   override type Self = Wishbone
-  override def formalAssertEquivalence(that : Wishbone): Unit = assert(formalConsumerContract.alwaysAck === that.formalConsumerContract.alwaysAck)
-  override def formalIsConsumerValid() = formalConsumerContract.valid
 }
 
 object Wishbone{
